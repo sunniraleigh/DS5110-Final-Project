@@ -1,0 +1,1418 @@
+# DS5110 Final Project
+# Kaylee Faherty, Cai Peng, & Sunni Raleigh
+# December 9, 2025
+
+# Load Libraries
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import geopandas as gpd
+import matplotlib as mpl
+import pandas as pd
+from sklearn.preprocessing import StandardScaler
+from sklearn.cluster import KMeans
+from sklearn.decomposition import PCA
+import matplotlib.pyplot as plt
+import seaborn as sns
+from statsmodels.stats.proportion import proportions_ztest
+import scipy.stats as stats
+from statsmodels.stats.proportion import proportion_confint
+from statsmodels.stats.multitest import multipletests
+from sklearn.decomposition import PCA
+from matplotlib.animation import FuncAnimation
+from IPython.display import HTML
+
+# Load & Clean Data
+def normalize_data(file_path):
+  # Load in csv
+  df = pd.read_csv(file_path, low_memory = False)
+  # print(f"pre df length: {len(df)}")
+  
+  # Drop irrelevant columns
+  irrelevant_cols = ["Dist ID", "Route ID", "Legacy Acct ID"]
+  df.drop(columns=[col for col in irrelevant_cols if col in df.columns], inplace=True)
+
+  # Standardize column names
+  df.columns = df.columns.str.strip().str.lower().str.replace(" ", "_")
+
+  # Drop rows missing critical identifiers
+  critical_cols = [col for col in ["subscriber_id", "publication"] if col in df.columns]
+  if critical_cols:
+    df.dropna(subset=critical_cols, inplace=True)
+
+  # Map publications
+  publication_map = {
+    "MTM_PT": "Portland Press Herald / Maine Sunday Telegram", 
+    "MTM_KJ": "Kennebec Journal",
+    "MTM_MS": "Morning Sentinel",
+    "AMG_TR": "Times Record",
+    "SMG_SJ": "Sun Journal",
+    "SMG_AD": "Advertisor Democrat",
+    "SMG_BC": "Bethel Citizen",
+    "SMG_FJ": "Franklin Journal",
+    "SMG_LFA": "Livermore Falls Advertisor",
+    "SMG_RFT": "Rumford Falls Times",
+    "SMG_RH": "Rangeley Highlander"}
+  
+  # Month and year
+  df["original_start_day"] = df["originalstartdate"].str.split("/").str[1].str.zfill(2)
+  df["original_start_month"] = df["originalstartdate"].str.split("/").str[0].str.zfill(2)
+  df["original_start_year"] = "20" + df["originalstartdate"].str.split("/").str[2]
+  df["last_start_day"] = df["laststartdate"].str.split("/").str[1].str.zfill(2)
+  df["last_start_month"] = df["laststartdate"].str.split("/").str[0].str.zfill(2)
+  df["last_start_year"] = "20" + df["laststartdate"].str.split("/").str[2]
+  df["originalstartdate_string"] = df["original_start_year"] + "/" + df["original_start_month"] + "/" + df["original_start_day"]
+  df["laststartdate_string"] = df["last_start_year"] + "/" + df["last_start_month"] + "/" + df["last_start_day"]
+  df["originalstartdate"] = pd.to_datetime(df["originalstartdate_string"], format = "%Y/%m/%d")
+  df["laststartdate"] = pd.to_datetime(df["laststartdate_string"], format = "%Y/%m/%d")
+
+  # Other column cleanup & mutation
+  df["account_id"] = df["accoutid"]
+  df["day_pattern"] = df["day_pattern"].astype(str).str.strip()
+  df["channel"] = np.where(df["day_pattern"] == "O7Day", "Digital", "Print")
+  df["is_digital"] = df['day_pattern'].str.upper().eq('O7DAY')
+  df["state"] = df["state"].astype(str).str.strip().str.upper()
+  df["city"] = df["city"].astype(str).str.strip().str.title()
+  df["zip_code"] = df["zip"].astype(str).str.zfill(5)
+  df["publication_name"] = df["publication"].map(publication_map)
+  df["bill_method"] = df["bill_method"].astype(str).str.strip()
+  df["status"] = df["status"].astype(str).str.strip()
+  df["snapshot_month"] = pd.to_numeric(file_path.split(".")[0][-1])+ 1
+  df["snapshot_month"] = df["snapshot_month"].astype(str).str.zfill(2)
+  df["snapshot_year"] = "2024"
+  df["snapshot_date_string"] = df["snapshot_year"] + "/" + df["snapshot_month"]
+  df["snapshot_date"] = pd.to_datetime(df["snapshot_date_string"], format = "%Y/%m")
+
+  # Analytics variables
+  df["months_since_original_start"] = (df["snapshot_date"].dt.to_period("M") - df["originalstartdate"].dt.to_period("M")).apply(lambda x: x.n if pd.notnull(x) else None)
+  df["months_since_last_start"] = (df["snapshot_date"].dt.to_period("M") - df["laststartdate"].dt.to_period("M")).apply(lambda x: x.n if pd.notnull(x) else None)
+
+  # Filter for Maine only
+  df = df[df["state"] == "ME"]
+
+  # Fill missing categorical values with "Unknown"
+  for col in ["town", "publication_name"]:
+    if col in df.columns:
+      df[col] = df[col].fillna("Unknown")
+
+  # Fill missing numeric values with median
+  num_cols = df.select_dtypes(include="number").columns
+  for col in num_cols:
+    df[col] = df[col].fillna(df[col].median())
+
+  # print(f"post df length: {len(df)}")
+
+  # Remove duplicates
+  df = df.drop_duplicates()
+  
+  # print(f"dedupe df length: {len(df)}")
+
+  # Relevant columns
+  relevant_cols = ["publication_name", "account_id", "status", "bill_method", "day_pattern",
+                   "city", "state", "rate_code", "laststartdate", "originalstartdate",
+                   "channel", "is_digital", "zip_code", "snapshot_date", 
+                   "months_since_original_start", "months_since_last_start", 
+                   "snapshot_month", "snapshot_year"]
+  df = df[relevant_cols]
+
+  # print(df[["channel", "day_pattern"]].head(25))
+
+  # print(df.columns)
+  return(df)
+
+files = [
+  "data/sublist1.csv", # sublist2.1.24.xlsx
+  "data/sublist2.csv", # sublist3.1.24.xlsx
+  "data/sublist3.csv", # sublist4.1.24.xlsx
+  "data/sublist4.csv", # sublist5.1.24.xlsx
+  "data/sublist5.csv", # sublist6.1.24.xlsx
+  "data/sublist6.csv", # sublist7.1.24.xlsx
+  "data/sublist7.csv", # sublist8.1.24.xlsx
+  "data/sublist8.csv", # sublist9.1.24.xlsx
+  "data/sublist9.csv"] # sublist10.01.24.xlsx
+
+all_data = pd.DataFrame()
+for file_path in files:
+  raw_df = normalize_data(file_path)
+  all_data = pd.concat([all_data, raw_df])
+
+print(all_data.columns)
+print(all_data.head(10))
+
+# Data Exploration & Analysis (Kaylee)
+## Increase default font sizes for all graphs
+plt.rcParams.update({
+    "font.size": 20,        # base font size
+    "axes.titlesize": 24,   # title font size
+    "axes.labelsize": 20,   # x and y axis labels
+    "xtick.labelsize": 20,  # x tick labels
+    "ytick.labelsize": 20,  # y tick labels
+    "legend.fontsize": 20   # legend text
+})
+
+## Only keep rows with valid month/year before building period
+churn_df = all_data[all_data["snapshot_month"].notna() & all_data["snapshot_year"].notna()].copy()
+
+## Build period as integer to avoid float suffix (e.g. .0)
+churn_df['period'] = (churn_df["snapshot_year"].astype(int) * 100 + churn_df["snapshot_month"].astype(int)).astype(int)
+
+## Parse period_dt safely
+churn_df['period_dt'] = pd.to_datetime(churn_df['period'].astype(str), format='%Y%m', errors='coerce')
+
+## Build churn flag
+last_seen = churn_df.groupby('account_id')['period'].max().reset_index()
+last_seen = last_seen.rename(columns={'period':'last_seen_period'})
+max_period = churn_df['period'].max()
+last_seen['cancelled'] = (last_seen['last_seen_period'] < max_period).astype(int)
+churn_df = churn_df.merge(last_seen[['account_id','cancelled']], on='account_id', how='left')
+
+required_cols = ['publication_name', 'is_digital', 'bill_method', 'city', 'rate_code', 'account_id', 'cancelled']
+missing = [c for c in required_cols if c not in churn_df.columns]
+if missing:
+    print("Warning: missing columns in dataset:", missing)
+
+## Churn rate summary tables
+## Overall Churn Rate
+overall_total = churn_df['account_id'].nunique()
+overall_cancelled = churn_df[churn_df['cancelled'] == 1]['account_id'].nunique()
+overall_churn_rate = overall_cancelled / overall_total * 100
+
+print("\n=== Overall Churn Rate ===")
+print(f"Total Subscribers: {overall_total}")
+print(f"Cancelled Subscribers: {overall_cancelled}")
+print(f"Overall Churn Rate: {overall_churn_rate:.1f}%")
+
+## 1. By Publication
+pub_total = churn_df.groupby('publication_name')['account_id'].nunique()
+pub_cancelled = churn_df[churn_df['cancelled']==1].groupby('publication_name')['account_id'].nunique()
+pub_summary = pd.DataFrame({'Cancelled': pub_cancelled, 'Total': pub_total})
+pub_summary['Cancelled'] = pub_summary['Cancelled'].fillna(0)
+pub_summary['Churn Rate (%)'] = (pub_summary['Cancelled'] / pub_summary['Total'] * 100).round(1)
+print("\n=== Churn Rate by Publication ===")
+print(pub_summary.sort_values('Churn Rate (%)', ascending=False).to_string())
+
+## 2. By Format
+fmt_total = churn_df.groupby('is_digital')['account_id'].nunique()
+fmt_cancelled = churn_df[churn_df['cancelled']==1].groupby('is_digital')['account_id'].nunique()
+fmt_summary = pd.DataFrame({'Cancelled': fmt_cancelled, 'Total': fmt_total})
+fmt_summary['Cancelled'] = fmt_summary['Cancelled'].fillna(0)
+fmt_summary['Churn Rate (%)'] = (fmt_summary['Cancelled'] / fmt_summary['Total'] * 100).round(1)
+fmt_summary.index = fmt_summary.index.map({True:'Digital', False:'Print'})
+print("\n=== Churn Rate by Format ===")
+print(fmt_summary.to_string())
+
+## 3. By Bill Method
+bill_total = churn_df.groupby('bill_method')['account_id'].nunique()
+bill_cancelled = churn_df[churn_df['cancelled']==1].groupby('bill_method')['account_id'].nunique()
+bill_summary = pd.DataFrame({'Cancelled': bill_cancelled, 'Total': bill_total})
+bill_summary['Cancelled'] = bill_summary['Cancelled'].fillna(0)
+bill_summary['Churn Rate (%)'] = (bill_summary['Cancelled'] / bill_summary['Total'] * 100).round(1)
+print("\n=== Churn Rate by Bill Method ===")
+print(bill_summary.sort_values('Churn Rate (%)', ascending=False).to_string())
+
+## 4. By cities (≥10 subscribers) - Shows top 15 churn rates
+city_total = churn_df.groupby('city')['account_id'].nunique()
+city_cancelled = churn_df[churn_df['cancelled']==1].groupby('city')['account_id'].nunique()
+city_total = city_total[city_total >= 10]
+city_summary = pd.DataFrame({'Cancelled': city_cancelled, 'Total': city_total})
+city_summary['Cancelled'] = city_summary['Cancelled'].fillna(0)
+city_summary['Churn Rate (%)'] = (city_summary['Cancelled'] / city_summary['Total'] * 100).round(1)
+city_summary = city_summary.dropna().sort_values('Churn Rate (%)', ascending=False).head(15)
+print("\n=== Top 15 Cities by Churn Rate (≥10 Subscribers) ===")
+print(city_summary.to_string())
+
+## 5. By Rate Code (≥10 subscribers) - Shows top 15 churn rates
+rate_total = churn_df.groupby('rate_code')['account_id'].nunique()
+rate_cancelled = churn_df[churn_df['cancelled']==1].groupby('rate_code')['account_id'].nunique()
+rate_total = rate_total[rate_total >= 10]
+rate_summary = pd.DataFrame({'Cancelled': rate_cancelled, 'Total': rate_total})
+rate_summary['Cancelled'] = rate_summary['Cancelled'].fillna(0)
+rate_summary['Churn Rate (%)'] = (rate_summary['Cancelled'] / rate_summary['Total'] * 100).round(1)
+rate_summary = rate_summary.dropna().sort_values('Churn Rate (%)', ascending=False).head(15)
+print("\n=== Top 15 Rate Codes by Churn Rate (≥10 Subscribers) ===")
+print(rate_summary.to_string())
+
+## Confidence intervals for churn rates
+## Helper function for churn CI
+def churn_ci(cancelled, total, alpha=0.05):
+    """
+    Calculate churn rate and confidence interval (Wilson score).
+    cancelled: number of cancelled subscribers
+    total: total subscribers
+    alpha: significance level (default 0.05 for 95% CI)
+    """
+    if total == 0:
+        return (np.nan, np.nan, np.nan)
+    rate = cancelled / total
+    ci_low, ci_high = proportion_confint(count=cancelled, nobs=total, alpha=alpha, method='wilson')
+    return (rate * 100, ci_low * 100, ci_high * 100)
+
+## Overall churn rate with CI
+overall_total = churn_df['account_id'].nunique()
+overall_cancelled = churn_df[churn_df['cancelled'] == 1]['account_id'].nunique()
+overall_rate, overall_low, overall_high = churn_ci(overall_cancelled, overall_total)
+
+print("\n=== Overall Churn Rate (with 95% CI) ===")
+print(f"Total Subscribers: {overall_total}")
+print(f"Cancelled Subscribers: {overall_cancelled}")
+print(f"Overall Churn Rate: {overall_rate:.1f}% (95% CI: {overall_low:.1f}% – {overall_high:.1f}%)")
+
+## Add CI columns to each summary table
+for summary_name, summary_df in {
+    "Publication": pub_summary,
+    "Format": fmt_summary,
+    "Bill Method": bill_summary,
+    "City": city_summary,
+    "Rate Code": rate_summary
+}.items():
+    summary_df[['CI Low (%)','CI High (%)']] = summary_df.apply(
+    lambda row: pd.Series(churn_ci(row['Cancelled'], row['Total']))[1:],  # take only low/high
+    axis=1
+)
+    print(f"\n=== {summary_name} Churn Rates with 95% CI ===")
+    print(summary_df.to_string())
+
+## Bar charts with churn% and subscriber counts
+def plot_churn_with_ci(summary_df, category_name):
+    """
+    Creates a bar chart with subscriber counts, churn %, and confidence intervals.
+    Uses pre-calculated CI columns: 'CI Low (%)' and 'CI High (%)'.
+    summary_df: DataFrame with columns ['Cancelled','Total','Churn Rate (%)','CI Low (%)','CI High (%)']
+    category_name: str, name of the category (e.g., 'Publication', 'Format')
+    """
+
+    fig, ax1 = plt.subplots(figsize=(10,6))
+
+    # Bar chart for churn rate
+    sns.barplot(
+        x=summary_df.index,
+        y="Churn Rate (%)",
+        data=summary_df,
+        ax=ax1,
+        color="skyblue",
+        edgecolor="black"
+    )
+
+    # Add error bars using pre-calculated CI bounds
+    ax1.errorbar(
+        x=range(len(summary_df)),
+        y=summary_df["Churn Rate (%)"],
+        yerr=[
+            (summary_df["Churn Rate (%)"] - summary_df["CI Low (%)"]).abs(),
+            (summary_df["CI High (%)"] - summary_df["Churn Rate (%)"]).abs()
+        ],
+        fmt="none",
+        c="black",
+        capsize=5
+    )
+
+    # Secondary axis for subscriber counts
+    ax2 = ax1.twinx()
+    ax2.plot(
+        range(len(summary_df)),
+        summary_df["Total"],
+        color="red",
+        marker="o",
+        linestyle="--",
+        label="Subscriber Count"
+    )
+    ax2.set_ylabel("Subscriber Count", color="red")
+
+    # Labels and formatting
+    ax1.set_title(f"Churn Rate with 95% CI by {category_name}")
+    ax1.set_ylabel("Churn Rate (%)")
+    ax1.set_xlabel(category_name)
+
+    # Conditional formatting for x-axis labels
+    if category_name in ["Publication", "Bill Method"]:
+        # Wrap and angle labels
+        labels = [label.get_text().replace(" ", "\n") for label in ax1.get_xticklabels()]
+        ax1.set_xticks(ax1.get_xticks())
+        ax1.set_xticklabels(labels, rotation=55)
+    else:
+        ax1.tick_params(axis='x', rotation=0)
+
+    # Legend placement depends on category
+    if category_name == "Bill Method":
+        ax2.legend(loc="upper right")
+    else:
+        ax2.legend(loc="upper left")
+
+
+    plt.tight_layout()
+    
+
+plot_churn_with_ci(pub_summary, "Publication")
+plot_churn_with_ci(fmt_summary, "Format")
+plot_churn_with_ci(bill_summary, "Bill Method")
+
+## P-value calculations
+pval_results = {}
+
+## 1. Publication (Chi-square test)
+pub_contingency = pd.crosstab(churn_df['publication_name'], churn_df['cancelled'])
+chi2, pval, dof, expected = stats.chi2_contingency(pub_contingency)
+pval_results['Publication'] = pval
+
+## 2. Format (Digital vs Print, two-proportion z-test)
+stat, pval = proportions_ztest(count=fmt_summary['Cancelled'].values, nobs=fmt_summary['Total'].values)
+pval_results['Format (Digital vs Print)'] = pval
+
+## 3. Bill Method (Chi-square test)
+bill_contingency = pd.crosstab(churn_df['bill_method'], churn_df['cancelled'])
+chi2, pval, dof, expected = stats.chi2_contingency(bill_contingency)
+pval_results['Bill Method'] = pval
+
+## 4. Cities (Chi-square test, ≥10 subs)
+city_contingency = pd.crosstab(churn_df[churn_df['city'].isin(city_total.index)]['city'], churn_df['cancelled'])
+chi2, pval, dof, expected = stats.chi2_contingency(city_contingency)
+pval_results['Cities (≥10 subs)'] = pval
+
+## 5. Rate Codes (Chi-square test, ≥10 subs)
+rate_contingency = pd.crosstab(churn_df[churn_df['rate_code'].isin(rate_total.index)]['rate_code'], churn_df['cancelled'])
+chi2, pval, dof, expected = stats.chi2_contingency(rate_contingency)
+pval_results['Rate Codes (≥10 subs)'] = pval
+
+## Build summary table
+pval_table = pd.DataFrame.from_dict(pval_results, orient='index', columns=['p-value'])
+pval_table['Significant (<0.05)'] = pval_table['p-value'] < 0.05
+print("\n=== P-Values for Churn Rate Differences ===")
+print(pval_table.to_string())
+
+## Helper: Cramér's V for chi-square effect size
+def cramers_v(chi2, n, r, c):
+    """
+    Calculate Cramér's V effect size.
+    chi2: chi-square statistic
+    n: total sample size
+    r: number of rows in contingency table
+    c: number of columns in contingency table
+    """
+    return np.sqrt(chi2 / (n * (min(r-1, c-1))))
+
+## Extended results dictionary
+## Deduplicate so each subscriber is counted once
+unique_df = churn_df.drop_duplicates('account_id')
+
+extended_results = {}
+
+## 1. Publication (Chi-square)
+pub_contingency = pd.crosstab(unique_df['publication_name'], unique_df['cancelled'])
+chi2, pval, dof, expected = stats.chi2_contingency(pub_contingency)
+n = pub_contingency.sum().sum()
+cramerv = cramers_v(chi2, n, *pub_contingency.shape)
+extended_results['Publication'] = {'chi2': chi2, 'pval': pval, 'cramers_v': cramerv}
+
+## 2. Format (Z-test)
+fmt_counts = unique_df.groupby('is_digital')['cancelled'].sum()
+fmt_totals = unique_df.groupby('is_digital')['account_id'].nunique()
+stat, pval = proportions_ztest(count=fmt_counts.values, nobs=fmt_totals.values)
+extended_results['Format (Digital vs Print)'] = {'z': stat, 'pval': pval}
+
+## 3. Bill Method (Chi-square)
+bill_contingency = pd.crosstab(unique_df['bill_method'], unique_df['cancelled'])
+chi2, pval, dof, expected = stats.chi2_contingency(bill_contingency)
+n = bill_contingency.sum().sum()
+cramerv = cramers_v(chi2, n, *bill_contingency.shape)
+extended_results['Bill Method'] = {'chi2': chi2, 'pval': pval, 'cramers_v': cramerv}
+
+## 4. Cities (Chi-square, ≥10 subs)
+city_subset = unique_df[unique_df['city'].isin(city_total.index)]
+city_contingency = pd.crosstab(city_subset['city'], city_subset['cancelled'])
+chi2, pval, dof, expected = stats.chi2_contingency(city_contingency)
+n = city_contingency.sum().sum()
+cramerv = cramers_v(chi2, n, *city_contingency.shape)
+extended_results['Cities (≥10 subs)'] = {'chi2': chi2, 'pval': pval, 'cramers_v': cramerv}
+
+## 5. Rate Codes (Chi-square, ≥10 subs)
+rate_subset = unique_df[unique_df['rate_code'].isin(rate_total.index)]
+rate_contingency = pd.crosstab(rate_subset['rate_code'], rate_subset['cancelled'])
+chi2, pval, dof, expected = stats.chi2_contingency(rate_contingency)
+n = rate_contingency.sum().sum()
+cramerv = cramers_v(chi2, n, *rate_contingency.shape)
+extended_results['Rate Codes (≥10 subs)'] = {'chi2': chi2, 'pval': pval, 'cramers_v': cramerv}
+
+## Build extended summary table
+ext_table = pd.DataFrame(extended_results).T
+
+## Replace NaN values with "N/A" for clarity
+ext_table = ext_table.fillna("N/A")
+
+## Multiple testing correction (Bonferroni and FDR)
+pvals = ext_table['pval'].dropna().values  # drop NaN for tests without pval
+bonferroni = multipletests(pvals, alpha=0.05, method='bonferroni')[1]
+fdr = multipletests(pvals, alpha=0.05, method='fdr_bh')[1]
+
+ext_table.loc[ext_table['pval'].notna(), 'Bonferroni adj p'] = bonferroni
+ext_table.loc[ext_table['pval'].notna(), 'FDR adj p'] = fdr
+
+print("\n=== Extended Statistical Results ===")
+print(ext_table.to_string())
+print("\nNote: Cramér's V reported for chi-square tests as effect size. "
+      "Chi² and z statistics shown alongside p-values. "
+      "Bonferroni and FDR corrections applied for multiple testing.")
+
+print("\n=== Interpretation Guide for Extended Results ===")
+print("How to read this table:")
+print("- p-value: Probability that observed churn differences are due to chance.")
+print("    • <0.05 usually considered statistically significant.")
+print("- Chi² / z statistic: Test statistic showing strength of evidence against the null hypothesis.")
+print("    • Higher values = stronger evidence of real differences.")
+print("- Cramér's V (effect size for chi-square tests):")
+print("    • ~0.1 = small association, ~0.3 = medium, ~0.5+ = large.")
+print("- Bonferroni adjusted p-value: Conservative correction for multiple tests.")
+print("    • Helps avoid false positives, but may miss weaker real effects.")
+print("- FDR (Benjamini–Hochberg): Balances false discovery risk.")
+print("    • More power to detect true effects while controlling overall error rate.")
+
+## Additional Visuals
+
+## 1. Top 5 Cities by Publication (October 2024)
+october_df = churn_df[churn_df['period'] == 202410]
+city_counts = (
+    october_df.groupby(['publication_name','city'])['account_id']
+    .nunique()
+    .reset_index(name='subscriber_count')
+)
+pub_totals = (
+    october_df.groupby('publication_name')['account_id']
+    .nunique()
+    .reset_index(name='total_subscribers')
+)
+city_counts = city_counts.merge(pub_totals, on='publication_name')
+city_counts['percent'] = city_counts['subscriber_count'] / city_counts['total_subscribers'] * 100
+city_counts = city_counts.sort_values(['publication_name','subscriber_count'], ascending=[True,False])
+top5_cities = city_counts.groupby('publication_name').head(5)
+
+pivot = top5_cities.pivot_table(index='publication_name', columns='city', values='percent', fill_value=0)
+ax = pivot.plot(kind='bar', stacked=True, figsize=(12,6), colormap='tab20')
+plt.title("Top 5 Cities by Publication (October 2024)")
+plt.ylabel("Percentage of Subscribers")
+plt.xlabel("Publication")
+labels = [label.get_text().replace(" ", "\n") for label in ax.get_xticklabels()]
+ax.set_xticklabels(labels)
+for i, pub in enumerate(pivot.index):
+    cumulative = 0
+    for city in pivot.columns:
+        value = pivot.loc[pub, city]
+        if value > 0:
+            # Position annotation in the middle of the segment
+            ax.text(i, cumulative + value/2, city,
+                    ha='center', va='center', fontsize=18, color='black')
+            cumulative += value
+ax.get_legend().remove()
+plt.tight_layout()
+
+
+## 2. Digital vs Print Subscribers by Publication (October 2024)
+df_last = churn_df[churn_df['period'] == churn_df['period'].max()].copy()
+df_last['format'] = df_last['is_digital'].map({True: 'Digital', False: 'Print'})
+unique_counts = (
+    df_last.groupby(['publication_name','format'])['account_id']
+    .nunique()
+    .reset_index(name='count')
+)
+
+plt.figure(figsize=(12,6))
+ax = sns.barplot(x="publication_name", y="count", hue="format", data=unique_counts, palette="Set2")
+plt.title("Digital vs Print Subscribers by Publication (Latest Month)")
+plt.ylabel("Unique Subscribers")
+plt.xlabel("Publication")
+
+## Wrap labels and rotate them 90 degrees
+labels = [label.get_text().replace(" ", "\n") for label in ax.get_xticklabels()]
+ax.set_xticks(ax.get_xticks())
+ax.set_xticklabels(labels, rotation=90)
+
+plt.legend(title="Format")
+plt.tight_layout()
+
+
+## 3. Subscriber Counts Over Time
+churn_df['period_dt'] = pd.to_datetime(churn_df['period'].astype(str), format='%Y%m')
+subs_by_period = churn_df.groupby('period_dt')['account_id'].nunique()
+plt.figure(figsize=(15,8))
+ax = subs_by_period.plot(kind="line", marker="o")
+plt.title("Subscriber Counts Over Time")
+plt.xlabel("Month")
+plt.ylabel("Unique Subscribers")
+ax.set_xticks(subs_by_period.index)
+ax.set_xticklabels(subs_by_period.index.strftime('%b %Y'), rotation=45, ha="right")
+plt.tight_layout()
+
+
+## 4. Churn Rate Over Time
+churn_by_period = churn_df.groupby('period_dt')['cancelled'].mean() * 100
+plt.figure(figsize=(15,8))
+ax = churn_by_period.plot(kind="line", marker="o", color="red")
+plt.title("Churn Rate Over Time (%)")
+plt.xlabel("Month")
+plt.ylabel("Churn Rate (%)")
+ax.set_xticks(churn_by_period.index)
+ax.set_xticklabels(churn_by_period.index.strftime('%b %Y'), rotation=45, ha="right")
+plt.tight_layout()
+
+
+# Maine Town Penetration (Kaylee)
+subs = all_data
+
+## --- Load Maine population data (headers are in 3rd row) ---
+pop = pd.read_excel("data/Maine_Cities_Towns_Population_Estimates_2024.xlsx", header=2)
+
+## --- Standardize column names ---
+pop.columns = pop.columns.str.strip().str.lower().str.replace(" ", "_")
+
+## --- Select town + population columns ---
+pop = pop[['town', '2024_population']].rename(columns={'2024_population':'population'})
+
+## --- Normalize town names in population data ---
+### Strip only 'city' and 'town' suffixes, keep 'plantation' and 'UT' distinct
+pop['town'] = pop['town'].str.replace(r'\s+(city|town)$', '', regex=True).str.strip()
+
+## --- Normalize subscriber city names ---
+subs['city'] = subs['city'].str.strip().str.title()
+
+## --- Manual mapping for ambiguous cases ---
+manual_map = {
+    'Lincoln': 'Lincoln town',
+    'Rangeley': 'Rangeley town',
+    'Unity': 'Unity town',
+    # Add more if anomalies appear
+}
+subs['city_normalized'] = subs['city'].map(manual_map).fillna(subs['city'])
+
+## --- Aggregate subscribers by normalized city ---
+subs_by_city = subs.groupby('city_normalized').size().reset_index(name='subscribers')
+subs_by_city = subs_by_city.rename(columns={'city_normalized':'town'})
+
+## --- Merge with population data ---
+merged = subs_by_city.merge(pop, on='town', how='inner')
+
+## --- Calculate penetration percentage ---
+merged['penetration_pct'] = (merged['subscribers'] / merged['population']) * 100
+
+## --- Diagnostic: flag anomalies >100% ---
+anomalies = merged[merged['penetration_pct'] > 100]
+print("Anomalies (penetration > 100%):")
+print(anomalies[['town','subscribers','population','penetration_pct']])
+
+## --- Exclude anomalies from graphs ---
+merged_clean = merged[merged['penetration_pct'] <= 100]
+
+## --- Top 10 towns by penetration ---
+top10 = merged_clean.sort_values('penetration_pct', ascending=False).head(10)
+plt.figure(figsize=(10,6))
+plt.barh(top10['town'], top10['penetration_pct'], color='steelblue')
+plt.xlabel("Penetration (%)")
+plt.title("Top 10 Maine Towns by Subscriber Penetration (Excluding >100%)")
+plt.gca().invert_yaxis()
+plt.tight_layout()
+
+
+## --- Bottom 10 towns by penetration ---
+bottom10 = merged_clean.sort_values('penetration_pct', ascending=True).head(10)
+plt.figure(figsize=(10,6))
+plt.barh(bottom10['town'], bottom10['penetration_pct'], color='orange')
+plt.xlabel("Penetration (%)")
+plt.title("Bottom 10 Maine Towns by Subscriber Penetration (Excluding >100%)")
+plt.gca().invert_yaxis()
+plt.tight_layout()
+
+
+## --- Histogram of penetration rates ---
+plt.figure(figsize=(10,6))
+plt.hist(merged_clean['penetration_pct'], bins=20, color='skyblue', edgecolor='black')
+plt.xlabel("Penetration (%)")
+plt.ylabel("Number of Towns")
+plt.title("Distribution of Subscriber Penetration Across Maine Towns (Excluding >100%)")
+plt.tight_layout()
+
+
+# Data Clustering (Cai)
+## Create dictionary for Cai visualizations
+df_dict = {}
+for month in all_data["snapshot_month"].unique():
+   df_dict[month] = all_data[all_data["snapshot_month"] == month]
+
+all_df = df_dict["10"]  # use only the latest month data (October 2024)
+
+latest_active = all_df[all_df["status"] == "Active"].copy()
+
+snapshot_date = pd.Timestamp('2024-10-01') # assuming snapshot is at the start of October 2024
+
+# Group publications (keep top 5, rest as "Other")
+top_pubs = latest_active['publication_name'].value_counts().head(5).index
+latest_active['publication_name_grouped'] = latest_active['publication_name'].apply(lambda x: x if x in top_pubs else 'Other')
+
+# tenure since first start (loyalty-ish)
+latest_active["tenure_from_original_days"] = (snapshot_date - latest_active["originalstartdate"]).dt.days
+
+# age of current term (how long the current start has been running)
+latest_active["age_of_current_term_days"] = (snapshot_date - latest_active["laststartdate"]).dt.days
+
+latest_active["renewal_gap_days"] = (latest_active["laststartdate"] - latest_active["originalstartdate"]).dt.days
+
+conditions = [
+    latest_active["bill_method"].str.contains("Auto Pay - CC", case=False, na=False),
+    latest_active["bill_method"].str.contains("Office Pay", case=False, na=False)
+]
+choices = ["Auto Pay - CC", "Office Pay"]
+latest_active["bill_method_group"] = np.select(conditions, choices, default="Other")
+
+# Remove rows with missing critical data
+df_clean = latest_active.dropna(subset=['tenure_from_original_days', 'age_of_current_term_days', 'renewal_gap_days']).copy()
+
+numeric_features = [
+  "tenure_from_original_days", # older vs newer
+  "age_of_current_term_days",  # how recent the current start is
+  "renewal_gap_days"]          # 0 = continuous, >0 = had a break
+
+categorical_features = [
+  "channel",           # digital vs print
+  "bill_method_group", # autopay vs other
+  "publication_name"]  # which publication
+
+## one-hot encode categoricals
+X_cat = pd.get_dummies(df_clean[categorical_features], drop_first=False)
+
+## scale numeric features
+scaler = StandardScaler()
+X_num_scaled = scaler.fit_transform(df_clean[numeric_features])
+
+## combine into final matrix
+X = np.hstack([X_num_scaled, X_cat.values])
+
+k = 3  # you can try 3, 4, 5 and compare
+kmeans = KMeans(n_clusters=k, n_init=10, random_state=42)
+df_clean["cluster"] = kmeans.fit_predict(X)
+
+print("Numeric feature means by cluster:")
+print(df_clean.groupby("cluster")[numeric_features].mean())
+
+print("\nChannel distribution by cluster:")
+print(df_clean.groupby("cluster")["channel"].value_counts(normalize=True).unstack().fillna(0))
+
+print("\nBill method distribution by cluster:")
+print(df_clean.groupby("cluster")["bill_method_group"].value_counts(normalize=True).unstack().fillna(0))
+
+print("\nPublication distribution by cluster (top 5 per cluster):")
+for c in sorted(df_clean["cluster"].unique()):
+  print(f"\nCluster {c}:")
+  print(df_clean[df_clean["cluster"] == c]["publication_name"].value_counts(normalize=True).head(5))
+
+## PCA
+pca = PCA(n_components=2)
+X_2d = pca.fit_transform(X)
+
+plt.figure(figsize=(8, 6))
+scatter = plt.scatter(
+    X_2d[:, 0],
+    X_2d[:, 1],
+    c=df_clean["cluster"],
+    alpha=0.6
+)
+plt.xlabel("PC 1")
+plt.ylabel("PC 2")
+plt.title("Subscribers in PCA space colored by cluster")
+plt.colorbar(scatter, label="Cluster")
+
+
+## Cluster means
+cluster_means = df_clean.groupby("cluster")[numeric_features].mean()
+cluster_means.plot(kind="bar", figsize=(8, 5))
+plt.title("Numeric feature means by cluster")
+plt.ylabel("Mean (original scale)")
+plt.xticks(rotation=0)
+
+
+## Channel distribution
+channel_dist = df_clean.groupby("cluster")["channel"].value_counts(normalize=True).unstack().fillna(0)
+channel_dist.plot(kind="bar", stacked=True, figsize=(8, 5))
+plt.title("Channel distribution by cluster")
+plt.ylabel("Proportion")
+plt.xticks(rotation=0)
+
+## Publication distribution
+channel_dist = df_clean.groupby("cluster")["publication_name"].value_counts(normalize=True).unstack().fillna(0)
+channel_dist.plot(kind="bar", stacked=True, figsize=(8, 5))
+plt.title("Publications distribution by cluster")
+plt.ylabel("Proportion")
+plt.xticks(rotation=0)
+
+## Bill method distribution
+channel_dist = df_clean.groupby("cluster")["bill_method_group"].value_counts(normalize=True).unstack().fillna(0)
+channel_dist.plot(kind="bar", stacked=True, figsize=(8, 5))
+plt.title("Bill Methods distribution by cluster")
+plt.ylabel("Proportion")
+plt.xticks(rotation=0)
+
+channel_dict = {}
+for month, df in df_dict.items():
+    digital_count = (df["channel"] == "Digital").sum()
+    print_count   = (df["channel"] == "Print").sum()
+    channel_dict[month] = {'Print': print_count, 'Digital': digital_count}
+
+months = sorted(channel_dict.keys())
+print_counts   = np.array([channel_dict[m]['Print'] for m in months])
+digital_counts = np.array([channel_dict[m]['Digital'] for m in months])
+x = np.arange(len(months))
+
+# Month-over-month growth rates (in %) ---
+print_growth   = np.diff(print_counts) / print_counts[:-1] * 100
+digital_growth = np.diff(digital_counts) / digital_counts[:-1] * 100
+x_growth = x[1:]  # growth is between months, so starts at second month
+
+fig, ax1 = plt.subplots(figsize=(10, 6))
+
+# Stacked Bars: Print at bottom, Digital on top ---
+bar_width = 0.6  # a bit wider since we only have one stack per month
+
+bars_print = ax1.bar(
+    x,
+    print_counts,
+    width=bar_width,
+    label='Print'
+)
+
+bars_digital = ax1.bar(
+    x,
+    digital_counts,
+    width=bar_width,
+    bottom=print_counts,  # stack Digital on top of Print
+    label='Digital'
+)
+
+ax1.set_xlabel('Month')
+ax1.set_ylabel('Number of Subscribers')
+ax1.set_xticks(x)
+ax1.set_xticklabels(months)
+
+# --- second axis: growth rates ---
+ax2 = ax1.twinx()
+line_print_growth, = ax2.plot(
+    x_growth,
+    print_growth,
+    marker='o',
+    linestyle='--',
+    color='red',
+    label='Print MoM %'
+)
+line_digital_growth, = ax2.plot(
+    x_growth,
+    digital_growth,
+    marker='o',
+    linestyle='-',
+    color='green',
+    label='Digital MoM %'
+)
+ax2.set_ylabel('MoM Growth (%)')
+
+# --- combined legend (bars + lines) ---
+handles1, labels1 = ax1.get_legend_handles_labels()
+handles2, labels2 = ax2.get_legend_handles_labels()
+ax1.legend(
+    handles1 + handles2,
+    labels1 + labels2,
+    loc='upper left'
+)
+plt.title('Print vs Digital Subscribers and MoM Growth')
+plt.tight_layout()
+
+## Double bar chart of digital vs print by month and location
+# channel_group = df_clean.groupby(["snapshot_month", "channel"]).size().reset_index(name = "count")
+
+# print_counts = channel_group[channel_group["channel"] == "Print"]["count"]
+# digital_counts = channel_group[channel_group["channel"] == "Digital"]["count"]
+
+# ## Month-over-month growth rates
+# print_growth = np.diff(print_counts) / print_counts[:-1] * 100
+# digital_growth = np.diff(digital_counts) / digital_counts[:-1] * 100
+
+# months = sorted(channel_group["snapshot_month"])
+# x = np.arange(len(months))
+# x_growth = x[1:] # growth is between months, so starts at second month
+
+# fig, ax1 = plt.subplots(figsize=(10, 6))
+
+# ## --- stacked bars: Print at bottom, Digital on top ---
+# bar_width = 0.6  # a bit wider since we only have one stack per month
+
+# bars_print = ax1.bar(x, print_counts, width = bar_width, label = 'Print')
+# bars_digital = ax1.bar(x, digital_counts, width = bar_width, bottom=print_counts, label = 'Digital') # stack Digital on top of Print
+
+# ax1.set_xlabel('Month')
+# ax1.set_ylabel('Number of Subscribers')
+# ax1.set_xticks(x)
+# ax1.set_xticklabels(months)
+
+# # --- second axis: growth rates ---
+# ax2 = ax1.twinx()
+# line_print_growth, = ax2.plot(
+#   x_growth,
+#   print_growth,
+#   marker='o',
+#   linestyle='--',
+#   color='red',
+#   label='Print MoM %')
+
+# line_digital_growth, = ax2.plot(
+#     x_growth,
+#     digital_growth,
+#     marker='o',
+#     linestyle='-',
+#     color='green',
+#     label='Digital MoM %')
+
+# ax2.set_ylabel('MoM Growth (%)')
+
+# # --- combined legend (bars + lines) ---
+# handles1, labels1 = ax1.get_legend_handles_labels()
+# handles2, labels2 = ax2.get_legend_handles_labels()
+# ax1.legend(
+#     handles1 + handles2,
+#     labels1 + labels2,
+#     loc='upper left'
+# )
+
+# plt.title('Print vs Digital Subscribers and MoM Growth')
+# plt.tight_layout()
+
+## All publications viz
+all_pub_series = pd.concat([df["publication_name"] for df in df_dict.values()])
+global_top3 = all_pub_series.value_counts().head(3).index.tolist()
+
+months = sorted(df_dict.keys())
+cols = global_top3 + ["Other"]
+
+summary = pd.DataFrame(0, index=months, columns=cols, dtype=int)
+
+for month, df_m in df_dict.items():
+    counts = df_m["publication_name"].value_counts()
+    for pub in global_top3:
+        summary.loc[month, pub] = counts.get(pub, 0)
+    other_count = counts[~counts.index.isin(global_top3)].sum()
+    summary.loc[month, "Other"] = other_count
+
+# 2) MoM growth (%)
+growth = summary[global_top3].pct_change() * 100   # first row NaN
+
+# 3) Plot: stacked bars + MoM lines
+fig, ax1 = plt.subplots(figsize=(10, 6))
+
+bar_colors = ["#1f77b4", "#ff7f0e", "#2ca02c", "lightgray"]  # top3 + Other
+summary.plot(
+    kind="bar",
+    stacked=True,
+    ax=ax1,
+    color=bar_colors
+)
+
+ax1.set_xlabel("Month")
+ax1.set_ylabel("Count")
+ax1.set_title("Top 3 Publications vs Others by MoM Growth")
+
+x = np.arange(len(months))
+
+# Choose distinct colors for the MoM lines
+line_colors = ["red", "black", "magenta"]  # one per top3 pub
+
+ax2 = ax1.twinx()
+for i, pub in enumerate(global_top3):
+    ax2.plot(
+        x,
+        growth[pub].values,     # NaN at first month is fine
+        marker='o',
+        linestyle='--',
+        color=line_colors[i],
+        label=f"{pub} MoM %",
+    )
+
+ax2.set_ylabel("MoM Growth (%)")
+
+# Combine legends
+handles1, labels1 = ax1.get_legend_handles_labels()
+handles2, labels2 = ax2.get_legend_handles_labels()
+ax1.legend(
+    handles1 + handles2,
+    labels1 + labels2,
+    bbox_to_anchor=(1.05, 1),
+    loc="upper left",
+    title="Publication"
+)
+plt.tight_layout()
+
+# 1️⃣ Combine all months into one big DataFrame
+all_df = pd.concat(df_dict.values(), ignore_index=True)
+
+# -------------------------------
+#  First chart:
+#  Top Maine Cities by Subscriber Count (Digital vs Print)
+# -------------------------------
+
+TOP_N = 10  
+
+# Filter to just Maine
+maine_df = all_df[all_df["state"] == "ME"]
+
+# Group by City + Channel, count subscribers (rows)
+city_channel_counts = (
+    maine_df
+    .groupby(["city", "channel"])
+    .size()
+    .unstack(fill_value=0)   # columns: Print, Digital
+)
+
+# Add total subscribers to sort on
+city_channel_counts["total"] = city_channel_counts.sum(axis=1)
+
+# Take top N cities
+top_cities = city_channel_counts.sort_values("total", ascending=False).head(TOP_N)
+
+# Plot Digital vs Print for top Maine cities
+ax = top_cities[["Print", "Digital"]].plot(
+    kind="bar",
+    figsize=(12, 6)
+)
+
+plt.title("Top Maine Cities by Subscriber Count (Digital vs Print)")
+plt.xlabel("City")
+plt.ylabel("Subscriber Count")
+plt.xticks(rotation=45, ha="right")
+plt.tight_layout()
+
+# # -------------------------------
+# #  Second chart:
+# #  Top States Outside Maine by Subscriber Count (Digital vs Print)
+# # -------------------------------
+
+# # Filter to states that are NOT Maine
+# outside_me_df = all_df[all_df["state"] != "ME"]
+
+# state_channel_counts = (
+#     outside_me_df
+#     .groupby(["state", "channel"])
+#     .size()
+#     .unstack(fill_value=0)
+# )
+
+# state_channel_counts["total"] = state_channel_counts.sum(axis=1)
+
+# top_states = state_channel_counts.sort_values("total", ascending=False).head(TOP_N)
+
+# ax2 = top_states[["Print", "Digital"]].plot(
+#     kind="bar",
+#     figsize=(12, 6)
+# )
+
+# plt.title("Top States Outside Maine by Subscriber Count (Digital vs Print)")
+# plt.xlabel("State")
+# plt.ylabel("Subscriber Count")
+# plt.xticks(rotation=45, ha="right")
+# plt.tight_layout()
+
+# # Make sure Bill Method is cleaned
+# all_df["bill_method"] = all_df["bill_method"].astype(str).str.strip()
+# all_df["bill_method"] = all_df["bill_method"].replace("", np.nan)
+
+# # Split Maine vs Outside Maine
+# maine_df      = all_df[all_df["state"] == "ME"]
+# outside_me_df = all_df[all_df["state"] != "ME"]
+
+# TOP_N = 8  # how many bill methods to show (by total volume)
+
+# -------------------------------
+# 1️⃣ Inside Maine: Digital vs Print by Bill Method
+# -------------------------------
+bm_ch_me = (
+    maine_df
+    .groupby(["bill_method", "channel"])
+    .size()
+    .unstack(fill_value=0)          # columns: Print, Digital
+)
+
+# keep only top N bill methods by total count
+bm_ch_me["total"] = bm_ch_me.sum(axis=1)
+bm_ch_me_top = bm_ch_me.sort_values("total", ascending=False).head(TOP_N)
+bm_ch_me_top = bm_ch_me_top[["Print", "Digital"]]  # keep only these columns
+
+ax = bm_ch_me_top.plot(
+    kind="bar",
+    figsize=(12, 6)
+)
+
+plt.title("Bill Method by Channel Inside Maine")
+plt.xlabel("Bill Method")
+plt.ylabel("Subscriber Count")
+plt.xticks(rotation=45, ha="right")
+plt.tight_layout()
+
+# -------------------------------
+# 2️⃣ Outside Maine: Digital vs Print by Bill Method
+# -------------------------------
+# bm_ch_out = (
+#     outside_me_df
+#     .groupby(["bill_method", "channel"])
+#     .size()
+#     .unstack(fill_value=0)
+# )
+
+# bm_ch_out["total"] = bm_ch_out.sum(axis=1)
+# bm_ch_out_top = bm_ch_out.sort_values("total", ascending=False).head(TOP_N)
+# bm_ch_out_top = bm_ch_out_top[["Print", "Digital"]]
+
+# ax2 = bm_ch_out_top.plot(
+#     kind="bar",
+#     figsize=(12, 6)
+# )
+
+# plt.title("Bill Method by Channel Outside Maine")
+# plt.xlabel("Bill Method")
+# plt.ylabel("Subscriber Count")
+# plt.xticks(rotation=45, ha="right")
+# plt.tight_layout()
+
+# Heat Map of top publication, digital increase rate, subscriber increase rate, and total subscriber of each county
+zip_dict = {}
+
+for month, df in df_dict.items():
+    zip_num = pd.to_numeric(df["zip_code"], errors="coerce")
+    mask = (df["state"] == "ME") & zip_num.between(3901, 4992)
+    me_zip = df.loc[mask].copy()
+    zip_counts_all = me_zip.groupby("zip_code").size()
+    zip_counts_digital = (
+        me_zip[me_zip["channel"] == "Digital"]
+        .groupby("zip_code")
+        .size()
+    )
+    zip_dict[month] = {
+        "total": zip_counts_all.to_dict(),
+        "digital": zip_counts_digital.to_dict(),
+    }
+
+month_start = "02"
+month_end = "10"
+
+total_2   = zip_dict[month_start]["total"]
+total_10  = zip_dict[month_end]["total"]
+digital_2  = zip_dict[month_start]["digital"]
+digital_10 = zip_dict[month_end]["digital"]
+
+# all zip codes that appear in either month
+all_zips = set(total_2.keys()) | set(total_10.keys()) | set(digital_2.keys()) | set(digital_10.keys())
+
+total_change = {}
+digital_change = {}
+
+for z in all_zips:
+    total_change[z] = total_10.get(z, 0) - total_2.get(z, 0)
+    digital_change[z] = digital_10.get(z, 0) - digital_2.get(z, 0)
+
+zcta = gpd.read_file("tl_2020_us_zcta520/tl_2020_us_zcta520.shp")
+zcta["zip_num"] = zcta["ZCTA5CE20"].astype(int)
+zcta_me = zcta[zcta["zip_num"].between(3901, 4992)].copy()
+
+# Make a clean Zip column as 5-digit string
+zcta_me["zip_code"] = zcta_me["ZCTA5CE20"].astype(str).str.zfill(5)
+
+# 3. Build change_df from your dicts
+change_df = pd.DataFrame({
+    "zip_code": list(total_change.keys()),
+    "total_change": list(total_change.values()),
+})
+change_df["digital_change"] = change_df["zip_code"].map(digital_change)
+
+# ensure Zip is also 5-digit string
+change_df["zip_code"] = change_df["zip_code"].astype(int).astype(str).str.zfill(5)
+
+# 4. Join change data to *Maine-only* ZCTAs
+ma_change = zcta_me.merge(change_df, on="zip_code", how="left")
+
+# Fill missing values with 0 (no change data for that ZIP)
+ma_change[["total_change", "digital_change"]] = (
+    ma_change[["total_change", "digital_change"]].fillna(0)
+)
+
+# 5. Plot a heat map (example: total_change)
+fig, ax = plt.subplots(figsize=(8, 10))
+change = [item for key, item in total_change.items()]
+
+cmap = mpl.cm.viridis
+bounds = [-10, 0, 10, 20, 30, 50, 80]
+norm = mpl.colors.BoundaryNorm(bounds, cmap.N, extend='both')
+
+ma_change.plot(
+    column="total_change",
+    ax=ax,
+    cmap=cmap,
+    norm=norm,                 # <- tell it to use your BoundaryNorm
+    edgecolor="black",
+    linewidth=0.2,
+    legend=True,
+    legend_kwds={              # <- make the colorbar match your bins
+        "boundaries": bounds,
+        "ticks": bounds,
+        "spacing": "proportional",
+        "label": "Total change",
+        "extend": "both",      # to show arrows above/below range
+    },
+)
+
+ax.set_title("Change in Total Subscribers by ZIP (Feb - Oct 2024)")
+ax.axis("off")
+plt.tight_layout()
+
+fig, ax = plt.subplots(figsize=(8, 10))
+
+cmap = mpl.cm.viridis
+bounds = [-10, 0, 10, 20, 30, 50, 80]
+norm = mpl.colors.BoundaryNorm(bounds, cmap.N, extend='both')
+
+ma_change.plot(
+    column="digital_change",
+    ax=ax,
+    cmap=cmap,
+    norm=norm,                 # <- tell it to use your BoundaryNorm
+    edgecolor="black",
+    linewidth=0.2,
+    legend=True,
+    legend_kwds={              # <- make the colorbar match your bins
+        "boundaries": bounds,
+        "ticks": bounds,
+        "spacing": "proportional",
+        "label": "Digital change",
+        "extend": "both",      # to show arrows above/below range
+    },
+)
+
+ax.set_title("Change in Digital Subscription by ZIP (Feb - Oct 2024)")
+ax.axis("off")
+plt.tight_layout()
+
+
+fig, ax = plt.subplots(figsize=(8, 10))
+
+cmap = mpl.cm.viridis
+bounds = [-10, 0, 10, 20, 30, 50, 80]
+norm = mpl.colors.BoundaryNorm(bounds, cmap.N, extend='both')
+
+ma_change.plot(
+    column="digital_change",
+    ax=ax,
+    cmap=cmap,
+    norm=norm,                 # <- tell it to use your BoundaryNorm
+    edgecolor="black",
+    linewidth=0.2,
+    legend=True,
+    legend_kwds={              # <- make the colorbar match your bins
+        "boundaries": bounds,
+        "ticks": bounds,
+        "spacing": "proportional",
+        "label": "Digital change",
+        "extend": "both",      # to show arrows above/below range
+    },
+)
+
+ax.set_title("Change in Digital Subscription by ZIP (Feb - Oct 2024)")
+ax.axis("off")
+plt.tight_layout()
+
+# # -------------------------
+# # 1. Build a GDF per month
+# # -------------------------
+# months = sorted(zip_dict.keys())   # e.g. [2,3,4,5,6,7,8,9,10]
+
+# ma_subscribers_by_month = {}
+
+# for m in months:
+#     df_subscribers = pd.DataFrame(
+#         list(zip_dict[m]['total'].items()),
+#         columns=["zip_code", "count"]
+#     )
+#     df_subscribers["zip_code"] = (
+#         df_subscribers["zip_code"].astype(int).astype(str).str.zfill(5)
+#     )
+    
+#     gdf_m = zcta_me.merge(df_subscribers, on="zip_code", how="left")
+#     gdf_m["count"] = gdf_m["count"].fillna(0)
+#     ma_subscribers_by_month[m] = gdf_m
+
+# # -------------------------
+# # 2. Global min/max for color scale
+# # -------------------------
+# all_counts = pd.concat(
+#     [gdf["count"] for gdf in ma_subscribers_by_month.values()],
+#     axis=0
+# )
+# vmin = all_counts.min()
+# vmax = all_counts.max()
+
+# # -------------------------
+# # 3. Set up figure, colormap, and ONE colorbar
+# # -------------------------
+# cmap = mpl.cm.viridis
+
+# fig, ax = plt.subplots(figsize=(8, 10))
+
+# norm = mpl.colors.Normalize(vmin=vmin, vmax=vmax)
+# sm = mpl.cm.ScalarMappable(cmap=cmap, norm=norm)
+# sm.set_array([])
+
+# cbar = fig.colorbar(sm, ax=ax)
+# cbar.set_label("Total subscribers")
+
+# month_labels = {
+#     2: "Feb 2024",
+#     3: "Mar 2024",
+#     4: "Apr 2024",
+#     5: "May 2024",
+#     6: "Jun 2024",
+#     7: "Jul 2024",
+#     8: "Aug 2024",
+#     9: "Sep 2024",
+#     10: "Oct 2024",
+# }
+
+# # -------------------------
+# # 4. Animation function
+# # -------------------------
+# def update(frame):
+#     ax.clear()  # clears map but not colorbar
+
+#     month = months[frame]
+#     gdf = ma_subscribers_by_month[month]
+
+#     gdf.plot(
+#         column="count",
+#         ax=ax,
+#         cmap=cmap,
+#         vmin=vmin,
+#         vmax=vmax,
+#         edgecolor="black",
+#         linewidth=0.2,
+#         legend=False,   # <- important: no new colorbar each frame
+#     )
+
+#     label = month_labels.get(month, f"Month {month}")
+#     ax.set_title(f"Total Subscribers by ZIP ({label})")
+#     ax.axis("off")
+
+# # -------------------------
+# # 5. Create and display animation in Jupyter
+# # -------------------------
+# anim = FuncAnimation(
+#     fig,
+#     update,
+#     frames=len(months),
+#     interval=1000,
+#     repeat=True
+# )
+
+# HTML(anim.to_jshtml())
+
+# Visualizing Clusters on a map (Sunni)
+# Group data by clusters and zip_code
+grouped_clusters = df_clean.groupby(["cluster", "zip_code"]).size().reset_index(name = "subscriber_count")
+
+# Filter clusters
+cluster0 = grouped_clusters[grouped_clusters["cluster"] == 0]
+cluster1 = grouped_clusters[grouped_clusters["cluster"] == 1]
+cluster2 = grouped_clusters[grouped_clusters["cluster"] == 2]
+
+print(f"0: {len(cluster0)}")
+print(f"1: {len(cluster1)}")
+print(f"2: {len(cluster2)}")
+
+# Join cluster data with shapefiles
+cluster0_shape = zcta_me.merge(cluster0, on = "zip_code", how = "outer")
+cluster0_shape["subscriber_count"] = cluster0_shape["subscriber_count"].fillna(0)
+
+cluster1_shape = zcta_me.merge(cluster1, on = "zip_code", how = "outer")
+cluster1_shape["subscriber_count"] = cluster1_shape["subscriber_count"].fillna(0)
+
+cluster2_shape = zcta_me.merge(cluster2, on = "zip_code", how = "outer")
+cluster2_shape["subscriber_count"] = cluster2_shape["subscriber_count"].fillna(0)
+
+print(f"0: {len(cluster0_shape)}")
+print(f"1: {len(cluster1_shape)}")
+print(f"2: {len(cluster2_shape)}")
+
+# Plot Cluster 0
+fig, ax = plt.subplots(figsize=(8, 10))
+cmap = mpl.cm.viridis
+bounds = [-10, 0, 10, 20, 30, 50, 80]
+norm = mpl.colors.BoundaryNorm(bounds, cmap.N, extend='both')
+
+cluster0_shape.plot(
+   column = "subscriber_count",
+   ax = ax,
+   cmap = cmap,
+   norm = norm,
+   edgecolor = "black",
+   linewidth = 0.2,
+   legend = True,
+   legend_kwds = {
+      "boundaries": bounds,
+      "ticks": bounds,
+      "spacing": "proportional",
+      "label": "Cluster 0 Subscriber Count",
+      "extend": "both"})
+
+ax.set_title("Total Cluster 0 Subscribers")
+ax.axis("off")
+plt.tight_layout()
+plt.savefig("cluster0.png")
+
+# Plot Cluster 1
+fig, ax = plt.subplots(figsize=(8, 10))
+cmap = mpl.cm.viridis
+bounds = [-10, 0, 10, 20, 30, 50, 80]
+norm = mpl.colors.BoundaryNorm(bounds, cmap.N, extend='both')
+
+cluster1_shape.plot(
+   column = "subscriber_count",
+   ax = ax,
+   cmap = cmap,
+   norm = norm,
+   edgecolor = "black",
+   linewidth = 0.2,
+   legend = True,
+   legend_kwds = {
+      "boundaries": bounds,
+      "ticks": bounds,
+      "spacing": "proportional",
+      "label": "Cluster 1 Subscriber Count",
+      "extend": "both"})
+
+ax.set_title("Total Cluster 1 Subscribers")
+ax.axis("off")
+plt.tight_layout()
+plt.savefig("cluster1.png")
+
+# Plot Cluster 2
+fig, ax = plt.subplots(figsize=(8, 10))
+cmap = mpl.cm.viridis
+bounds = [-10, 0, 10, 20, 30, 50, 80]
+norm = mpl.colors.BoundaryNorm(bounds, cmap.N, extend='both')
+
+cluster2_shape.plot(
+   column = "subscriber_count",
+   ax = ax,
+   cmap = cmap,
+   norm = norm,
+   edgecolor = "black",
+   linewidth = 0.2,
+   legend = True,
+   legend_kwds = {
+      "boundaries": bounds,
+      "ticks": bounds,
+      "spacing": "proportional",
+      "label": "Cluster 2 Subscriber Count",
+      "extend": "both"})
+
+ax.set_title("Total Cluster 2 Subscribers")
+ax.axis("off")
+plt.tight_layout()
+plt.savefig("cluster2.png")
+
+# Render Visualizations
+# plt.show()
